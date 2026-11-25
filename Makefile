@@ -1,0 +1,13 @@
+.PHONY: fmt lint test test-integration
+
+fmt:
+	go fmt ./...
+
+lint:
+	go vet ./...
+
+test:
+	go test -race ./...
+
+test-integration:
+	go test -tags=integration -race ./pgstore/...
