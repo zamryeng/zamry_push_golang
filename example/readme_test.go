@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -45,6 +46,25 @@ func declaring() (*push.Catalogue, error) {
 func vendorLimits(catalogue *push.Catalogue) error {
 	return fcm.CheckCatalogue(catalogue)
 }
+
+// ## The vendor credential
+func credentialFromKeyFile(keyFileBytes []byte) (*fcm.Client, error) {
+	cfg, err := fcm.ParseServiceAccount(keyFileBytes) // or fill Config yourself
+	if err != nil {
+		return nil, err
+	}
+	return fcm.New(cfg)
+}
+
+func credentialFromEnvironment() (*fcm.Client, error) {
+	return fcm.New(fcm.Config{
+		ProjectID:     os.Getenv("FIREBASE_PROJECT_ID"),   // project_id
+		ClientEmail:   os.Getenv("FIREBASE_CLIENT_EMAIL"), // client_email
+		PrivateKeyPEM: os.Getenv("FIREBASE_PRIVATE_KEY"),  // private_key
+	})
+}
+
+func warming(ctx context.Context, client *fcm.Client) error { return client.Warm(ctx) }
 
 func sending(catalogue *push.Catalogue, store push.Store, client push.Vendor, logger *slog.Logger) *push.Sender {
 	return &push.Sender{

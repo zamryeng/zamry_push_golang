@@ -76,6 +76,64 @@ if err := fcm.CheckCatalogue(catalogue); err != nil {
 }
 ```
 
+## The vendor credential
+
+Three strings, which are the three fields of a Firebase service-account key
+file that matter:
+
+```go
+cfg, err := fcm.ParseServiceAccount(keyFileBytes) // or fill Config yourself
+if err != nil {
+    return err
+}
+client, err := fcm.New(cfg)
+```
+
+Or, when the secret already lives in three environment variables, which is how
+`zamry_wallet_api` carries it:
+
+```go
+client, err := fcm.New(fcm.Config{
+    ProjectID:     os.Getenv("FIREBASE_PROJECT_ID"),   // project_id
+    ClientEmail:   os.Getenv("FIREBASE_CLIENT_EMAIL"), // client_email
+    PrivateKeyPEM: os.Getenv("FIREBASE_PRIVATE_KEY"),  // private_key
+})
+```
+
+**`ParseServiceAccount` takes bytes, not a path.** A library that opens paths
+invites one that is checked into a repository. Read the secret however this host
+already reads secrets, and mark the key field sensitive wherever config is
+dumped — it is a signing key, and a leaked one sends notifications as you.
+
+**An escaped `\n` in the key is accepted.** The key lives in a JSON file as one
+line with its newlines escaped, and whoever moved it into an environment
+variable almost always moved the escaping with it. PKCS#1 is accepted besides
+PKCS#8, because a key rotated by hand through `openssl` comes out as the former.
+Both are the common deployment mistake, and refusing them is a puzzle rather
+than a guard.
+
+**The key is parsed by `New`, not at first send.** A typo in a deployment's
+secret fails at startup, where somebody is watching, instead of at 3am on the
+first notification. Build the client **once per process**: it caches the
+hour-long access token it mints, and a client per send mints a new one every
+time.
+
+No `firebase-admin`, no `google.golang.org/api`. The client signs its own JWT
+assertion with that key and exchanges it for a `firebase.messaging` access
+token, which is why this package has no `go.sum` and brings no dependency tree
+into a service that only wanted to send a notification.
+
+Two optional fields earn their place at deploy time:
+
+| | |
+|---|---|
+`DryRun: true` | asks the vendor to validate without delivering — proves a credential and payload shape against the real endpoint without waking anybody's handset |
+`client.Warm(ctx)` | forces the token exchange at boot, so the first real send does not pay for it |
+
+`SendHost`, `TokenHost` and `TopicHost` exist for tests and a vendor emulator;
+empty means the real thing. In development, skip all of this — see
+[Development without a vendor](#development-without-a-vendor).
+
 ## Sending
 
 ```go
@@ -83,7 +141,7 @@ sender := &push.Sender{
     Catalogue:  catalogue,
     Store:      store,
     Recipients: push.EveryTokenOfAccount(store),
-    Vendor:     client, // fcm.New(...), or &fcm.Console{} in development
+    Vendor:     client, // from above, or &fcm.Console{} in development
     Log:        logger,
 }
 ```
