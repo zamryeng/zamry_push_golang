@@ -1,0 +1,146 @@
+# What this package's quality argument actually rests on.
+#
+# Every guard here was run by hand while the package was written, and a guard
+# that depends on somebody remembering is not a guard. Three of them exist
+# because they have already caught real defects:
+#
+#   - the conformance suites, which found four separate divergences between the
+#     memory and Postgres implementations, each passing its own tests
+#   - the zero-dependency check, because a test-only driver in the root module
+#     reaches every consumer and the first attempt at fencing it was wrong
+#   - the contract check, which is the only thing that can catch a renamed path
+#     between this repository and the Flutter SDK
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Read from go.mod rather than pinned here: the directive is the
+          # floor a consumer must meet, and it was once 1.27.3 by accident,
+          # which made the package unbuildable for the only service that tried
+          # to adopt it.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would change these files:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # A library that ships zero dependencies has to keep shipping zero. This
+      # is one line and it is the only thing standing between the package and a
+      # consumer inheriting a transitive graph it never asked for.
+      - name: No dependencies
+        run: |
+          if [ -f go.sum ]; then
+            echo "go.sum exists — this package declares no dependencies:" >&2
+            cat go.sum >&2
+            exit 1
+          fi
+          if grep -qE '^\s*require' go.mod; then
+            echo "go.mod has a require directive:" >&2
+            grep -nE '^\s*require' go.mod >&2
+            exit 1
+          fi
+
+      - name: Tests
+        run: go test -race -count=1 ./...
+
+  postgres:
+    name: Postgres integration
+    runs-on: ubuntu-latest
+
+    # The store tests are the one place a fake proves nothing: an ON CONFLICT
+    # that overwrites the wrong column, a claim two pollers both win, a lease
+    # that never expires. They run against a real server or not at all.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: push
+          POSTGRES_PASSWORD: push
+          POSTGRES_DB: push
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U push -d push"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Its own module, with its own floor: the driver these tests need is
+          # fenced in here precisely so it cannot reach a consumer.
+          go-version-file: pgstore/integration/go.mod
+          cache: true
+
+      - name: Integration tests
+        working-directory: pgstore/integration
+        env:
+          PUSH_TEST_DATABASE_URL: postgres://push:push@127.0.0.1:5432/push?sslmode=disable
+        run: go test -race -count=1 ./...
+
+  contract:
+    name: Contract against the SDK
+    runs-on: ubuntu-latest
+
+    # The only job that can catch a rename. Everything else proves one half
+    # against a fake of the other: the Go tests drive the handler with Go
+    # requests and the SDK's tests drive its client with a recorded transport,
+    # so both keep passing whatever the other half actually does.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: zamry_push_golang
+
+      - uses: actions/checkout@v4
+        with:
+          repository: zamryeng/zamry_push_flutter
+          path: zamry_push_flutter
+          # A private sibling needs a token with read access to it. Without one
+          # this job cannot run, which is why it is a job of its own rather
+          # than a step that silently skips inside another.
+          token: ${{ secrets.SDK_READ_TOKEN }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: zamry_push_golang/go.mod
+          cache: true
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Resolve the SDK
+        working-directory: zamry_push_flutter/packages/zamry_push
+        run: flutter pub get
+
+      - name: Check
+        working-directory: zamry_push_golang
+        run: ./contract/check.sh "$GITHUB_WORKSPACE/zamry_push_flutter"
