@@ -227,27 +227,44 @@ func (s *Sender) ReconcileTopics(ctx context.Context, a Audience, topics map[Cat
 		return nil, fmt.Errorf("push: selecting recipients: %w", err)
 	}
 
-	// ACTIVE handsets only, which is narrower than reachable and deliberately
-	// so.
+	// Two lists, and the difference between them is the whole of this
+	// function's correctness.
 	//
-	// Reachable includes a signed-out handset, and that exception exists for
-	// one reason: a kind that NAMES THE ACCOUNT must reach a phone nobody is
-	// signed into, because "your account was locked" is for its owner whoever
-	// is holding it. A broadcastable category is the exact complement — the
-	// catalogue refuses one that is both — so there is no such justification
-	// here, and subscribing a signed-out handset means a person who signed out
-	// keeps receiving marketing.
+	// SUBSCRIBING takes active handsets only. Reachable includes a signed-out
+	// one, and that exception exists for one reason: a kind that NAMES THE
+	// ACCOUNT must reach a phone nobody is signed into, because "your account
+	// was locked" is for its owner whoever is holding it. A broadcastable
+	// category is the exact complement — the catalogue refuses one that is
+	// both — so subscribing a signed-out handset means a person who signed
+	// out keeps receiving marketing.
 	//
-	// A dead token is excluded for the plainer reason: subscribing one spends
-	// a call to be told the vendor has forgotten it.
-	live := make([]string, 0, len(tokens))
+	// UNSUBSCRIBING takes every handset the vendor may still know, signed-out
+	// ones included. Narrowing both directions to active was a worse bug than
+	// the one it fixed: a handset subscribed while active and then signed out
+	// was never unsubscribed, so it kept receiving the thing it had just
+	// signed out of — and with every token signed out this returned early and
+	// touched nothing at all.
+	//
+	// A dead token is in neither: the vendor has forgotten it, so a call
+	// either way is spent being told so.
+	var live, known []string
 	for _, t := range tokens {
+		if t.Status == StatusDead {
+			continue
+		}
+		known = append(known, t.Token)
 		if t.Status == StatusActive {
 			live = append(live, t.Token)
 		}
 	}
-	if len(live) == 0 {
+	if len(known) == 0 {
 		return nil, nil
+	}
+	signedOut := known[:0:0]
+	for _, t := range tokens {
+		if t.Status == StatusSignedOut {
+			signedOut = append(signedOut, t.Token)
+		}
 	}
 
 	prefs, err := s.Store.Preferences(ctx, a.Account)
@@ -265,6 +282,22 @@ func (s *Sender) ReconcileTopics(ctx context.Context, a Audience, topics map[Cat
 			// a channel anyone may subscribe to, so there is no membership to
 			// reconcile and asking for one is a mistake worth seeing.
 			return refused, fmt.Errorf("%w: category %q", ErrNotBroadcastable, category)
+		}
+
+		// A signed-out handset comes off every broadcast topic whatever the
+		// preference says: the preference belongs to an account, and nobody
+		// is signed into this phone.
+		if len(signedOut) > 0 {
+			batch, rErr := s.Membership.Unsubscribe(ctx, topic, signedOut)
+			if rErr != nil {
+				return refused, fmt.Errorf("push: reconciling %q: %w", category, rErr)
+			}
+			refused = append(refused, batch...)
+		}
+
+		if len(live) == 0 {
+			// Nothing signed in to reconcile a preference for.
+			continue
 		}
 
 		var (

@@ -566,3 +566,75 @@ func TestASilentBroadcastRefusesALinkThatIsNotAPath(t *testing.T) {
 		t.Errorf("an absolute url on the silent path = %v, want ErrMalformed", err)
 	}
 }
+
+// The regression the first version of the active-only gate introduced.
+//
+// Narrowing both directions to active handsets meant a handset subscribed
+// while active and then signed out was never unsubscribed — so it kept
+// receiving the thing it had just signed out of, which is worse than the bug
+// being fixed.
+func TestASignedOutHandsetIsUnsubscribedFromEveryTopic(t *testing.T) {
+	s, _, topic := broadcastFixture(t)
+	ctx := context.Background()
+
+	for _, token := range []DeviceToken{
+		{AccountRef: "acct-1", Token: "tok-active", Platform: PlatformAndroid, Status: StatusActive},
+		{AccountRef: "acct-1", Token: "tok-signed-out", Platform: PlatformAndroid, Status: StatusSignedOut},
+	} {
+		if err := s.Store.SaveToken(ctx, token); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	membership := &recordingMembership{}
+	s.Membership = membership
+
+	// The preference ALLOWS marketing, which is the case that used to leave
+	// the signed-out handset subscribed.
+	if _, err := s.ReconcileTopics(ctx, Audience{Account: "acct-1"},
+		map[Category]Topic{"marketing": topic}); err != nil {
+		t.Fatal(err)
+	}
+
+	var subscribed, unsubscribed []string
+	for _, call := range membership.calls {
+		if call.op == "subscribe" {
+			subscribed = append(subscribed, call.tokens...)
+		} else {
+			unsubscribed = append(unsubscribed, call.tokens...)
+		}
+	}
+
+	if !slices.Equal(subscribed, []string{"tok-active"}) {
+		t.Errorf("subscribed %v, want only the active handset", subscribed)
+	}
+	if !slices.Equal(unsubscribed, []string{"tok-signed-out"}) {
+		t.Errorf("unsubscribed %v, want the signed-out handset", unsubscribed)
+	}
+}
+
+// With nothing signed in, the signed-out handsets still have to come off.
+// This returned early and touched nothing.
+func TestAllSignedOutStillUnsubscribes(t *testing.T) {
+	s, _, topic := broadcastFixture(t)
+	ctx := context.Background()
+
+	if err := s.Store.SaveToken(ctx, DeviceToken{
+		AccountRef: "acct-1", Token: "tok-signed-out",
+		Platform: PlatformAndroid, Status: StatusSignedOut,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	membership := &recordingMembership{}
+	s.Membership = membership
+
+	if _, err := s.ReconcileTopics(ctx, Audience{Account: "acct-1"},
+		map[Category]Topic{"marketing": topic}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(membership.calls) != 1 || membership.calls[0].op != "unsubscribe" {
+		t.Fatalf("calls = %+v, want one unsubscribe", membership.calls)
+	}
+}
