@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
@@ -497,5 +498,71 @@ func TestSenderDeliversASilentKindToAHandset(t *testing.T) {
 	}
 	if m.Data["version"] != "42" {
 		t.Errorf("data = %v", m.Data)
+	}
+}
+
+// A signed-out handset must not be subscribed to a broadcast topic.
+//
+// Reachable includes signed-out, and that exception exists so a kind NAMING
+// THE ACCOUNT reaches a phone nobody is signed into. A broadcastable category
+// is the exact complement — the catalogue refuses one that is both — so
+// subscribing a signed-out handset here means a person who signed out keeps
+// receiving marketing.
+func TestASignedOutHandsetIsNotSubscribedToATopic(t *testing.T) {
+	s, _, topic := broadcastFixture(t)
+	ctx := context.Background()
+
+	for _, token := range []DeviceToken{
+		{AccountRef: "acct-1", Token: "tok-active", Platform: PlatformAndroid, Status: StatusActive},
+		{AccountRef: "acct-1", Token: "tok-signed-out", Platform: PlatformAndroid, Status: StatusSignedOut},
+		{AccountRef: "acct-1", Token: "tok-dead", Platform: PlatformAndroid, Status: StatusDead},
+	} {
+		if err := s.Store.SaveToken(ctx, token); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	membership := &recordingMembership{}
+	s.Membership = membership
+
+	if _, err := s.ReconcileTopics(ctx, Audience{Account: "acct-1"},
+		map[Category]Topic{"marketing": topic}); err != nil {
+		t.Fatal(err)
+	}
+
+	var subscribed []string
+	for _, call := range membership.calls {
+		if call.op == "subscribe" {
+			subscribed = append(subscribed, call.tokens...)
+		}
+	}
+	if !slices.Equal(subscribed, []string{"tok-active"}) {
+		t.Errorf("subscribed %v, want only the active handset", subscribed)
+	}
+}
+
+// The two broadcast paths apply one field rule, and they did not.
+func TestABroadcastRefusesAFieldTheKindDoesNotDeclare(t *testing.T) {
+	s, _, topic := broadcastFixture(t)
+	ctx := context.Background()
+
+	// weekend_offer declares only "link".
+	_, err := s.Broadcast(ctx, topic, "weekend_offer", "en", Fields{"amount": "5,000"})
+	if !errors.Is(err, ErrMalformed) {
+		t.Errorf("an undeclared field on the speaking path = %v, want ErrMalformed", err)
+	}
+}
+
+func TestASilentBroadcastRefusesALinkThatIsNotAPath(t *testing.T) {
+	s, _, topic := broadcastFixture(t)
+	ctx := context.Background()
+
+	// A silent broadcast's data reaches every subscriber too, and an app that
+	// navigates on `link` does not care which path delivered it. The link was
+	// checked on the speaking path only.
+	_, err := s.BroadcastSignal(ctx, topic, "catalogue_changed",
+		Fields{"link": "https://attacker.test/x"})
+	if !errors.Is(err, ErrMalformed) {
+		t.Errorf("an absolute url on the silent path = %v, want ErrMalformed", err)
 	}
 }

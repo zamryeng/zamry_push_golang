@@ -109,12 +109,13 @@ func (s *Sender) Broadcast(ctx context.Context, t Topic, kindName, language stri
 		return Outcome{}, fmt.Errorf("push: no copy for %q in %q: %w", kind.Name, language, err)
 	}
 
-	// Checked before the vendor rather than after: the send site is where a
-	// link comes from, and a caller handed an absolute URL deserves an error
-	// it can answer a request with, not a permanent outcome from a vendor.
-	link := f["link"]
-	if link != "" && !InAppLink(link) {
-		return Outcome{}, fmt.Errorf("%w: %q is not an in-app path", ErrMalformed, link)
+	// The same field rule BroadcastSignal applies. These diverged: the silent
+	// path refused an undeclared field and this one accepted any, so a kind
+	// that never declared `link` could still carry one — and `link` is the
+	// field with a navigation consequence on a channel anyone may join.
+	link, err := broadcastFields(kind, f)
+	if err != nil {
+		return Outcome{}, err
 	}
 
 	return s.Broadcaster.Broadcast(ctx, t, Announcement{
@@ -149,25 +150,51 @@ func (s *Sender) BroadcastSignal(ctx context.Context, t Topic, kindName string, 
 		return Outcome{}, fmt.Errorf("%w: kind %q has wording — use Broadcast", ErrMalformed, kind.Name)
 	}
 
-	// Only what the kind declares. [Announcement] closes this at compile time
-	// by having no data field at all; the silent path had nothing equivalent,
-	// so a Fields map reused from a device send put whatever it happened to
-	// hold in front of everyone subscribed to a guessable topic name.
+	// The same rule the speaking path applies, including the link check: a
+	// silent broadcast's data reaches every subscriber too, and an app that
+	// navigates on `link` does not care which path delivered it.
+	if _, err := broadcastFields(kind, f); err != nil {
+		return Outcome{}, err
+	}
+
+	data := make(map[string]string, len(f)+1)
+	for name, v := range f {
+		data[name] = v
+	}
+	// Written last, so a declared field called `type` cannot redirect the
+	// handset to a different kind than the one that was sent.
+	data["type"] = kind.Name
+
+	return s.Broadcaster.BroadcastSignal(ctx, t, Signal{Data: data, Lifetime: kind.Lifetime}), nil
+}
+
+// broadcastFields checks a broadcast's fields and returns its link, if any.
+//
+// One helper for both broadcast paths, because they had the same rule written
+// once and the two drifted: an undeclared field was refused on the silent path
+// and accepted on the speaking one, and the link was validated on the speaking
+// one and not the silent one. A topic's membership is not access-controlled,
+// so either gap puts a caller's string in front of everybody who joined.
+func broadcastFields(kind Kind, f Fields) (link string, err error) {
 	declared := make(map[string]bool, len(kind.Fields))
 	for _, name := range kind.Fields {
 		declared[name] = true
 	}
-	data := make(map[string]string, len(f)+1)
+
 	for name, v := range f {
 		if !declared[name] {
-			return Outcome{}, fmt.Errorf("%w: kind %q does not declare field %q",
+			return "", fmt.Errorf("%w: kind %q does not declare field %q",
 				ErrMalformed, kind.Name, name)
 		}
-		data[name] = v
+		// `link` is the one field with a consequence beyond being read: a
+		// client that resolves it as a URL turns a channel anyone may
+		// subscribe to into a way of opening an arbitrary page on a
+		// stranger's handset.
+		if name == "link" && v != "" && !InAppLink(v) {
+			return "", fmt.Errorf("%w: %q is not an in-app path", ErrMalformed, v)
+		}
 	}
-	data["type"] = kind.Name
-
-	return s.Broadcaster.BroadcastSignal(ctx, t, Signal{Data: data, Lifetime: kind.Lifetime}), nil
+	return f["link"], nil
 }
 
 // ReconcileTopics sets an account's topic membership to match its preferences.
@@ -200,11 +227,22 @@ func (s *Sender) ReconcileTopics(ctx context.Context, a Audience, topics map[Cat
 		return nil, fmt.Errorf("push: selecting recipients: %w", err)
 	}
 
-	// Only reachable handsets. Subscribing a token the vendor has forgotten
-	// would spend a call to be told so, and the row is already retired.
+	// ACTIVE handsets only, which is narrower than reachable and deliberately
+	// so.
+	//
+	// Reachable includes a signed-out handset, and that exception exists for
+	// one reason: a kind that NAMES THE ACCOUNT must reach a phone nobody is
+	// signed into, because "your account was locked" is for its owner whoever
+	// is holding it. A broadcastable category is the exact complement — the
+	// catalogue refuses one that is both — so there is no such justification
+	// here, and subscribing a signed-out handset means a person who signed out
+	// keeps receiving marketing.
+	//
+	// A dead token is excluded for the plainer reason: subscribing one spends
+	// a call to be told the vendor has forgotten it.
 	live := make([]string, 0, len(tokens))
 	for _, t := range tokens {
-		if t.Status.Reachable() {
+		if t.Status == StatusActive {
 			live = append(live, t.Token)
 		}
 	}
