@@ -122,10 +122,14 @@ jobs:
         with:
           repository: zamryeng/zamry_push_flutter
           path: zamry_push_flutter
-          # A private sibling needs a token with read access to it. Without one
-          # this job cannot run, which is why it is a job of its own rather
-          # than a step that silently skips inside another.
-          token: ${{ secrets.SDK_READ_TOKEN }}
+          # No token: the sibling is public, so the default one reaches it.
+          #
+          # This first carried `token: ${{ secrets.SDK_READ_TOKEN }}`, written
+          # when that repository was going to be private. An unset secret is
+          # an empty string rather than an absent input, and checkout refuses
+          # it — "Input required and not supplied: token" — so the job failed
+          # on a line that was meant to make it work. If the sibling ever goes
+          # private, add the secret and restore that input together.
 
       - uses: actions/setup-go@v5
         with:
