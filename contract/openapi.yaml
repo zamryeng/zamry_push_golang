@@ -1,0 +1,305 @@
+openapi: 3.1.0
+
+info:
+  title: Push — the handset-facing contract
+  version: 0.1.0
+  description: |
+    What the Flutter SDK calls and the Go package serves.
+
+    The package ships these as one mountable `http.Handler`. The host mounts it
+    on its own router, behind its own authentication, at a prefix of its
+    choosing — so paths here are relative to that prefix and the host's own API
+    is what an app actually talks to.
+
+    **No endpoint takes an account or device identifier.** Who is calling comes
+    from the host's middleware through the package's `Identify` function. A
+    handset asserting which account it is would be asserting something it must
+    not, and a handset asserting which device it is would put the server's own
+    record in the client's hands.
+
+    This file exists because the two halves live in separate repositories in
+    separate languages, so nothing makes them agree at compile time. It is
+    written before either side is built against it, and it is the artefact to
+    change first when either side needs to move.
+
+    ## The push payload is part of this contract too
+
+    **It was not, and the two halves diverged.** This file described the four
+    HTTP calls and said nothing about the message that crosses the vendor —
+    which is the one shape both halves must agree on and the only one neither
+    could check. An end-to-end run found it: the Go package writes a kind's
+    fields at the top level of the vendor's `data` map, another backend
+    marshals them to a JSON string under `payload`, and a handset handler
+    reading a field worked against one sender and silently found nothing
+    against the other.
+
+    A `data` map therefore carries:
+
+    | key       | written by | meaning                                        |
+    |-----------|-----------|------------------------------------------------|
+    | `type`    | the sender, LAST | the kind. Written last so a field called `type` cannot redirect the handset. |
+    | `channel` | the sender | the Android channel to file it under. |
+    | `payload` | optionally | the kind's fields, as a JSON **object string** — the vendor's map is string-to-string, so it cannot nest natively. |
+    | anything else | the sender | a kind's own fields, at the top level. |
+
+    A client reads a kind's fields from `payload` when it is present and from
+    the top level otherwise, excluding the three keys above. A sender may use
+    either shape; it may not use both for the same message.
+
+    Everything on the wire is a **string**. A number put in by a sender arrives
+    as text and nothing may assume otherwise.
+
+    **A wrong method answers 405 with an empty, non-JSON body.** That comes
+    from Go's own router rather than from the handler, so a client that parses
+    `{code, message}` on every non-2xx response must tolerate a body it
+    cannot parse.
+
+servers:
+  - url: "{hostPrefix}"
+    description: Wherever the host mounted the handler.
+    variables:
+      hostPrefix:
+        default: /api/v1
+
+security:
+  - hostSession: []
+
+paths:
+  /notifications/token:
+    post:
+      summary: Register this handset's vendor token
+      description: |
+        Idempotent, and called on every launch as well as on token refresh: the
+        vendor reissues tokens without warning, and an app that only registers
+        once eventually goes quiet with no error anywhere.
+
+        Registering an account's token does not imply a session is active. A
+        handset that signs out keeps its row so it can still hear what names the
+        account; only the host's own sign-out marks it.
+      operationId: registerToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRegistration"
+      responses:
+        "204":
+          description: Registered, or already registered with these values.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+    delete:
+      summary: Retire this handset's token
+      description: |
+        For an app that knows it is going away — an explicit "stop notifying
+        this device". Not required on sign-out: the host marks the device
+        signed-out in its own transaction, and the vendor reports the token
+        stale on uninstall regardless.
+      operationId: retireToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRetirement"
+      responses:
+        "204":
+          description: Retired, or already unknown.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /notifications/preferences:
+    get:
+      summary: The categories this account can silence, and whether it has
+      description: |
+        Returns only categories that have a switch of their own. A category
+        nobody can silence has nothing to show and no state to report, so
+        listing it would invite a UI that renders a control doing nothing.
+
+        This is also how the app learns which of its declared categories are
+        muteable: the app knows the channel names, the server owns the rules.
+      operationId: readPreferences
+      responses:
+        "200":
+          description: The switchable categories and their current state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Preferences"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+    patch:
+      summary: Set one category's switch
+      description: |
+        One category per call, deliberately. A whole-map PUT invites a client to
+        send back a stale copy and silently undo a change made on another
+        handset.
+      operationId: setPreference
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreferenceChange"
+      responses:
+        "204":
+          description: Set.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: |
+            The category exists but cannot be silenced. Returned rather than
+            accepted-and-ignored, so a UI that should never have offered the
+            control finds out.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+components:
+  securitySchemes:
+    hostSession:
+      type: http
+      scheme: bearer
+      description: |
+        Whatever the host already uses. The package never parses it — it asks
+        the host's `Identify` function who the caller is and takes the answer.
+        Declared here only so a generated client sends the header the host
+        expects.
+
+  schemas:
+    TokenRegistration:
+      type: object
+      required: [token, platform]
+      properties:
+        token:
+          type: string
+          minLength: 1
+          description: The vendor's registration token for this handset.
+        platform:
+          type: string
+          enum: [android, ios]
+        language:
+          type: string
+          description: |
+            A BCP 47 tag. Decides which copy row a notification is rendered
+            from. Absent means the deployment's default.
+
+            A regional tag is welcome and is what handsets usually report. The
+            lookup tries the exact tag, then its base language, then English —
+            so `fr-CA` reads French copy when it exists, `pt-BR` reads Brazilian
+            wording in preference to Portuguese, and a tag with neither still
+            gets English rather than nothing.
+          default: en
+      example:
+        token: "eVnEWzrKSTKao2EMNVl3Ys:APA91bE..."
+        platform: android
+        language: en
+
+    TokenRetirement:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 1
+
+    Preferences:
+      type: object
+      required: [categories]
+      properties:
+        categories:
+          type: array
+          items:
+            type: object
+            required: [name, enabled]
+            properties:
+              name:
+                type: string
+                description: Matches a category the app declared.
+              enabled:
+                type: boolean
+      example:
+        categories:
+          - name: transactions
+            enabled: true
+          - name: marketing
+            enabled: false
+
+    PreferenceChange:
+      type: object
+      required: [category, enabled]
+      properties:
+        category:
+          type: string
+        enabled:
+          type: boolean
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable across releases; the message is not.
+        message:
+          type: string
+
+  responses:
+    TooLarge:
+      description: |
+        The body is larger than the handler's cap. A client that batches or
+        retries should shrink the request rather than repeat it — which is why
+        this is declared: generated clients had no typed branch for it and
+        surfaced it as an untyped transport failure, indistinguishable from
+        the 500 that means the opposite.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Internal:
+      description: |
+        The host's store refused. Safe to retry with backoff. Declared for the
+        same reason as the 413: these are the two a client most needs to tell
+        apart, and `code` is the field that says which.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BadRequest:
+      description: The body is malformed or a field is missing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: |
+        The host's middleware refused, or `Identify` could not name a caller.
+        The package never decides who someone is; it only refuses when it is
+        not told.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
