@@ -1,6 +1,9 @@
 package push
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Platform is the handset family a token belongs to.
 type Platform string
@@ -79,17 +82,41 @@ type Store interface {
 	CopyFor(ctx context.Context, kind, language string) (Copy, error)
 }
 
-// CatalogueAdmin is the write side of the catalogue, kept apart from Store
-// because it is rare, it is audited, and a service that only sends
-// notifications has no business holding the ability to rewrite what they say.
-type CatalogueAdmin interface {
-	SetCopy(ctx context.Context, c Copy, actor string) error
+// CopyStore is the write side of the copy table, kept apart from Store because
+// it is rare, it is audited, and a service that only sends notifications has no
+// business holding the ability to rewrite what they say.
+//
+// Storage only. It validates nothing — that is [Editor]'s job, because
+// validation needs the code-declared catalogue and a store must not know about
+// one. Anything calling this directly is writing unvalidated copy on purpose.
+type CopyStore interface {
+	// PutCopy writes wording and records who changed it. The timestamp is
+	// passed in rather than taken from the clock here so one edit and its
+	// audit row cannot disagree, and so a test can pin it.
+	PutCopy(ctx context.Context, c Copy, actor string, at time.Time) error
+
+	// CopyHistory returns a kind's edits, newest first. A limit of zero or
+	// less means all of them.
 	CopyHistory(ctx context.Context, kind string, limit int) ([]CopyChange, error)
+
+	// CopyKeys returns every kind-and-language pair that has a row.
+	//
+	// Needed by both of [Editor]'s whole-table questions — what is missing,
+	// and what is orphaned — and answering them from one read rather than a
+	// lookup per kind is the difference between a startup seed costing one
+	// round trip and costing one per language per kind.
+	CopyKeys(ctx context.Context) ([]CopyKey, error)
+}
+
+// CopyKey identifies one row of the copy table.
+type CopyKey struct {
+	Kind     string
+	Language string
 }
 
 // CopyChange is one audited edit to a kind's wording.
 type CopyChange struct {
 	Copy
 	Actor string
-	At    string
+	At    time.Time
 }

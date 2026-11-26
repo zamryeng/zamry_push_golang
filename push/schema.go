@@ -67,4 +67,27 @@ CREATE TABLE IF NOT EXISTS push_copy_audit (
 
 CREATE INDEX IF NOT EXISTS push_copy_audit_kind_idx
     ON push_copy_audit (kind, changed_at DESC);
+
+-- Only for a host using the reference poller. A host with a real broker puts
+-- its own Deferred implementation in front of that broker and never creates
+-- this table.
+--
+-- claimed_at is a lease, not a flag: a poller that dies between claiming a job
+-- and finishing it would otherwise strand that job forever, and the symptom is
+-- one notification that never arrives with nothing logged anywhere.
+CREATE TABLE IF NOT EXISTS push_jobs (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT        NOT NULL,
+    account_ref TEXT        NOT NULL,
+    device_key  BYTEA,
+    fields      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    first_seen  TIMESTAMPTZ NOT NULL,
+    attempts    INTEGER     NOT NULL DEFAULT 0,
+    run_at      TIMESTAMPTZ NOT NULL,
+    claimed_at  TIMESTAMPTZ
+);
+
+-- Every poll asks for due, unclaimed work in run_at order.
+CREATE INDEX IF NOT EXISTS push_jobs_due_idx
+    ON push_jobs (run_at, claimed_at);
 `

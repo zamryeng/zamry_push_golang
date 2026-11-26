@@ -38,6 +38,14 @@ type CategorySpec struct {
 	// never be broadcastable.
 	Broadcastable bool
 
+	// PrivateOnLockScreen hides the words on a locked handset set to conceal
+	// sensitive content, showing only that something arrived.
+	//
+	// Set it for anything naming an amount, a balance or an address. It is
+	// Android's own default for a channel, but stating it means the app's
+	// channel settings cannot quietly widen it.
+	PrivateOnLockScreen bool
+
 	// NamesTheAccount means the notification says something about the account
 	// itself, which is what a signed-out handset may still hear. A handset
 	// nobody is signed into still needs telling that the account was locked.
@@ -49,11 +57,20 @@ type Priority uint8
 
 const (
 	// PriorityNormal lets the platform batch and defer.
-	PriorityNormal Priority = iota
+	PriorityNormal Priority = iota + 1
 	// PriorityHigh wakes the handset. Reserve it for what cannot wait; the
 	// platforms punish an app that cries wolf by throttling it.
 	PriorityHigh
 )
+
+// Valid reports whether p is one of the two priorities.
+//
+// Counting from one so the zero value is neither, and a kind that forgot to
+// state a priority is refused at boot instead of defaulting. The sensible
+// looking default is the one that loses the message: a notification arriving
+// late because a field defaulted to normal is a failure no test notices and no
+// log records.
+func (p Priority) Valid() bool { return p == PriorityNormal || p == PriorityHigh }
 
 // Kind is what happened. It is declared in code, because a send site names it
 // and a name the compiler cannot see cannot be type-checked.
@@ -67,9 +84,21 @@ type Kind struct {
 	// outcome: nobody wants yesterday's balance alert at breakfast.
 	Lifetime time.Duration
 
-	// Fields are the placeholder names this kind's producers supply. Copy is
-	// validated against them, so a placeholder naming a field nobody sends is
-	// refused when it is written rather than rendered literally on a handset.
+	// Fields is this kind's payload surface: every name its producers may
+	// supply, whether the wording shows it or the app only reads it.
+	//
+	// Two things are checked against it, and both would otherwise fail far
+	// from where the mistake was made. Copy is validated when it is written,
+	// so a placeholder naming a field nobody sends is refused rather than
+	// rendered as a literal brace on a handset. And a send carrying a field
+	// that is not here is refused outright — on a topic, because a channel
+	// anyone may subscribe to must not carry whatever a reused map happened to
+	// hold; on a device, because a misspelled field name otherwise ships
+	// silently and the app falls through to a default it never chose.
+	//
+	// So a field the app needs but never displays — a transaction id behind a
+	// tap, a version to re-sync against — belongs here too. This list is the
+	// only place a reader can see what a notification actually carries.
 	Fields []string
 
 	// Silent means data-only: no title, no body, nothing shown.

@@ -9,6 +9,7 @@
 //	var TransferReceived = push.Kind{
 //	    Name:     "transfer_received",
 //	    Category: CategoryTransactions,
+//	    Priority: push.PriorityHigh,
 //	    Lifetime: 24 * time.Hour,
 //	    Fields:   []string{"amount", "sender"},
 //	}
